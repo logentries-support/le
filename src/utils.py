@@ -13,6 +13,10 @@ from backports import match_hostname, CertificateError
 
 import logging
 
+import time
+import datetime
+import _strptime
+
 
 __author__ = 'Logentries'
 
@@ -45,6 +49,100 @@ authority_certificate_files = [  # Debian 5.x, 6.x, 7.x, Ubuntu 9.10, 10.4, 13.0
 LOG_LE_AGENT = 'logentries.com'
 
 log = logging.getLogger(LOG_LE_AGENT)
+
+
+class TimeUtils:
+    UTC_STR_FORMAT = '%Y-%m-%dT%H:%M:%SZ'
+    UTC_STR_PATTERN = '\d+'
+
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def get_utc_time_str(timestamp=None):
+        """
+        The method returns current UTC formatted date-time string if "timestamp" value is not given
+        (equals to None). If timestamp is not none the method returns UTC string representation
+        for the given timestamp.
+
+        :param timestamp (int) or None:
+
+        :return current time - str - UTC formatted current time (like 2014-12-01T12:10:01Z):
+        """
+        return time.strftime(TimeUtils.UTC_STR_FORMAT, time.gmtime(timestamp))
+
+    @staticmethod
+    def get_current_time_as_timestamp_as_ms():
+        """
+        The method returns timestamp with millisecond resolution for the current time.
+
+        :return timestamp - long:
+        """
+        timestamp = int(round(time.time() * 1000))
+        return long(timestamp)
+
+    @staticmethod
+    def is_same_day(timestr1, timestr2):
+        """
+        The method checks whether given timestr1 and timestr2 are within the same day.
+        timestr1 and timestr2 are timestamps.
+
+        :param timestr1 - int - string:
+        :param timestr2 - int - timestamp:
+
+        :return is the same day - boolean - states whether given timestr1 and timestr2 are within the same day:
+        """
+        td1 = datetime.datetime.utcfromtimestamp(timestr1/1000)
+        td2 = datetime.datetime.utcfromtimestamp(timestr2/1000)
+        return td1.day == td2.day
+
+    @staticmethod
+    def get_diff(date1, date2):
+        """
+        The method returns the difference between given date1 and date2 as a tuple which holds these diff. parts:
+        (days, hours, minutes, seconds).
+        date1 and date2 may be given either as UTC-formatted strings or as timestamps.
+        This can be defined by stating use_timestamps value to True or False -
+        1) use_timestamps=False (default value) - date1 and date2 are UTC strings;
+        2) use_timestamps=True - date1 and date2 are timestamps.
+
+        :param date1 - str or int - UTC-formatted string or timestamp:
+        :param date2 - str or int - UTC-formatted string or timestamp:
+        :param use_timestamps - boolean - states whether given date1 and date2 should be threaten as timestamps:
+
+        :return diff as (days, hours, minutes, seconds) - tuple - difference between date1 and date2:
+        """
+        td1 = datetime.datetime.utcfromtimestamp(date1/1000)
+        td2 = datetime.datetime.utcfromtimestamp(date2/1000)
+        if td2 >= td1:
+            t_delta = td2 - td1
+        else:
+            t_delta = td1 - td2
+        hours, remainder = divmod(t_delta.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        return t_delta.days, hours, minutes, seconds
+
+    @staticmethod
+    def get_time_from_log_msg(msg):
+        """
+        The method parses given string and returns either UTC-formatted string or timestamp (return type is defined
+        by the value assigned to return_utc_string; if True - UTC-formatted string is returned, timestamp is returned
+        otherwise). If ms_precision is set to True - the method returns "fake" millisecond-resolution timestamp
+        (if return_utc_string=False) which is the same timestamp, but multiplied 1000 times; just to adjust the
+        exponent of the timestamp.
+
+        :param message - str - some string which contains UTC-formatted time:
+        :param return_utc_string - boolean - if set to True - the method returns timestamp:
+        :param ms_precision - boolean - if set to True - the method returns timestamp with "fake" ms. precision:
+
+        :return UTC-formatted - str or timestamp - long:
+        """
+        time_tuple = re.search(TimeUtils.UTC_STR_PATTERN, msg).regs[0]
+        start, end = time_tuple
+        time_str = msg[start:end]
+        return long(time_str)
+
 
 try:
     import ssl

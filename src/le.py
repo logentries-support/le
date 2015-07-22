@@ -50,6 +50,13 @@ KEY_LEN = 36
 ACCOUNT_KEYS_API = '/agent/account-keys/'
 ID_LOGS_API = '/agent/id-logs/'
 
+# Amazon S3-related parameters
+SEND_S3_PARAM = 'send_s3'
+
+AWS_S3_BUCKET_NAME = 'amazon_s3_bucket'
+AWS_S3_ACCOUNT_ID = 'amazon_s3_account_id'
+AWS_S3_SECRET_KEY = 'amazon_s3_secret_key'
+
 # Maximal queue size for events sent
 SEND_QUEUE_SIZE = 32000
 
@@ -238,6 +245,8 @@ from backports import CertificateError, match_hostname
 import formatters
 import metrics
 
+from s3_archiving_backend import AmazonS3ArchivingBackend
+
 #
 # Start logging
 #
@@ -254,6 +263,17 @@ stream_handler.setLevel(logging.DEBUG)
 stream_handler.setFormatter(logging.Formatter("%(message)s"))
 log.addHandler(stream_handler)
 
+# Get the logger for error/fatal messages, that should go to /var/log,
+# like config parsing errors.
+
+LOG_LOCAL_LOG_FILE = '/var/log/logentries-agent.log'
+
+local_var_logger = logging.getLogger(LOG_LE_AGENT)
+local_var_handler = logging.FileHandler(LOG_LOCAL_LOG_FILE)
+formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+local_var_handler.setFormatter(formatter)
+local_var_logger.addHandler(local_var_handler)
+local_var_logger.setLevel(logging.ERROR)
 
 def debug_filters(msg, *args):
     if config.debug_filters:
@@ -1246,13 +1266,30 @@ class Follower(object):
     The follower keeps an eye on the file specified and sends new events to the
     logentries infrastructure.  """
 
-    def __init__(self, name, event_filter, transport, formatter):
+    def __init__(self, name, event_filter, transport, formatter, token='', log_tag=None, need_send_s3=False,
+                 s3_backend=None):
         """ Initializes the follower. """
         self.name = name
         self.flush = True
         self.event_filter = event_filter
         self.formatter = formatter
         self.transport = transport
+        self.need_send_s3 = need_send_s3
+        self.s3_backend = s3_backend
+        self.token = token
+        self.amazon_s3_log_name = None
+
+        if self.need_send_s3 == True:
+            if log_tag is not None:
+                self.amazon_s3_log_name = log_tag
+            else:
+                head, tail = os.path.split(self.name)
+                if not tail:
+                    if self.name:
+                        tail = self.name  # In case, if name != real_name (e.g. name does not contain path to the file)
+                    else:
+                        tail = 'none_' + self.token[:3]  # Will be 'BASENAME_none_0123' if name is empty
+                self.amazon_s3_log_name = tail
 
         self._file = None
         self._shutdown = False
@@ -1401,6 +1438,10 @@ class Follower(object):
             print >> sys.stderr, line,
         self.transport.send(self.formatter.format_line(line))
 
+        if self.need_send_s3 is True and self.s3_backend is not None:
+            amazon_msg = self.token + ' ' + line
+            self.s3_backend.put_data_to_local_log(self.amazon_s3_log_name, self.token, amazon_msg)
+
     def close(self):
         """Closes the follower by setting the shutdown flag and waiting for the
         worker thread to stop."""
@@ -1413,16 +1454,12 @@ class Follower(object):
         while not self._shutdown:
             try:
                 line = self._get_line()
-                if line:
-                    self._send_line(line)
             except IOError, e:
                 if config.debug:
                     log.debug("IOError: %s", e)
                 self._open_log()
-            except UnicodeError, e:
-                log.warn("Error sending line %s", line, exc_info=True)
-            except Exception, e:
-		log.error("Caught unknown error %s while sending line: %s", e, line, exc_info=True)
+            if line:
+                self._send_line(line)
         self._close_log()
 
 
@@ -1647,11 +1684,12 @@ class DefaultTransport(object):
 
 class ConfiguredLog(object):
 
-    def __init__(self, name, token, destination, path):
+    def __init__(self, name, token, destination, path, send_s3):
         self.name = name
         self.token = token
         self.destination = destination
         self.path = path
+        self.send_s3 = send_s3
         self.logset = None
         self.set_key = None
         self.log_key = None
@@ -1731,6 +1769,11 @@ class Config(object):
         # Force host for this domain
         self.force_domain = NOT_SET
 
+        # S3 credentials
+        self.s3_account = NOT_SET
+        self.s3_bucket = NOT_SET
+        self.s3_key = NOT_SET
+
     def get_config_dir(self):
         """
         Identifies a configuration directory for the current user.
@@ -1781,6 +1824,7 @@ class Config(object):
                 HOSTNAME_PARAM: '',
                 PULL_SERVER_SIDE_CONFIG_PARAM: 'True'
             })
+            Config.fix_sections_names_format(self.config_filename)
             conf.read(self.config_filename)
 
             # Load parameters
@@ -1821,6 +1865,17 @@ class Config(object):
                 if system_stats_token_str != '':
                     self.system_stats_token = system_stats_token_str
 
+            try:
+                # Load S3 credentials
+                if self.s3_account == NOT_SET:
+                    self.s3_account = conf.get(MAIN_SECT, AWS_S3_ACCOUNT_ID)
+                if self.s3_bucket == NOT_SET:
+                    self.s3_bucket = conf.get(MAIN_SECT, AWS_S3_BUCKET_NAME)
+                if self.s3_key == NOT_SET:
+                    self.s3_key = conf.get(MAIN_SECT, AWS_S3_SECRET_KEY)
+            except ConfigParser.NoOptionError:
+                pass
+
             self.metrics.load(conf)
 
             self.load_configured_logs(conf)
@@ -1832,6 +1887,57 @@ class Config(object):
             # TODO: Warning
             return False
         return True
+
+    @staticmethod
+    def _extract_string(sample_string, tokens_to_omit):
+        for token in tokens_to_omit:
+            sample_string = sample_string.replace(token, '')
+        return sample_string.replace(os.linesep, '')
+
+    @staticmethod
+    def fix_sections_names_format(path_to_config, need_to_log_errors=True):  # need_to_log_errors used by unit tests
+        # Here we store patterns to check possible 'bad'
+        # section names formats; we must fix all them before calling
+        # config.read(), because ConfigParser will complain about
+        # bad format and will throw an error during parsing.
+
+        bad_appname_patterns = [
+            (re.compile('\[\]' + os.linesep), '[%s]', '[]'),           # [] - empty section name
+            (re.compile('^\[.*[^\]]' + os.linesep), '[%s]', '[]'),     # ] is missing, like "[sect_name"
+            (re.compile('^[^\[].*\]' + os.linesep), '[%s]', '[]')      # [ is missing, like "sect_name]"
+        ]
+
+        try:
+            with open(path_to_config, 'r') as conf_raw:
+                lines_buffer = conf_raw.readlines()
+
+            # This flag tells whether the config has been modified within the method
+            # and needs to be saved back to the file.
+            conf_modified = False
+
+            fixed_config = []
+            for line in lines_buffer:
+                for pattern in bad_appname_patterns:
+                    matcher, repl, tokens = pattern
+                    if matcher.match(line):
+                        if not conf_modified:
+                            conf_modified = True
+                        sect_name = Config._extract_string(line, tokens)
+                        replace_line = repl % (sect_name if sect_name else ' ')
+                        line = line.replace(os.linesep, '')
+                        if need_to_log_errors:
+                            local_var_logger.error('%s in config has bad format and will be replaced with %s' %
+                                               (line, replace_line))
+                        line = replace_line
+                        break
+                fixed_config.append(line)
+
+            if conf_modified:
+                with open(path_to_config, 'w') as conf_raw:
+                    conf_raw.writelines(fixed_config)
+        except IOError as e:
+            if need_to_log_errors:
+                local_var_logger.error('Cannot open/check/write the config file: %s' % e.message)
 
     def load_configured_logs(self, conf):
         global log
@@ -1860,7 +1966,13 @@ class Config(object):
                 except ConfigParser.NoOptionError:
                     pass
 
-                configured_log = ConfiguredLog(name, token, destination, path)
+                send_s3 = False
+                try:
+                    send_s3 = conf.get(name, SEND_S3_PARAM)
+                except ConfigParser.NoOptionError:
+                    pass
+
+                configured_log = ConfiguredLog(name, token, destination, path, send_s3)
 
                 self.configured_logs.append(configured_log)
 
@@ -1897,6 +2009,15 @@ class Config(object):
                 conf.set(
                     MAIN_SECT, SYSSTAT_TOKEN_PARAM, self.system_stats_token)
 
+            # Save S3 credentials, ONLY if they are defined
+            if self.s3_account != NOT_SET:
+                conf.set(MAIN_SECT, AWS_S3_ACCOUNT_ID, self.s3_account)
+            if self.s3_bucket != NOT_SET:
+                conf.set(MAIN_SECT, AWS_S3_BUCKET_NAME, self.s3_bucket)
+            if self.s3_key != NOT_SET:
+                conf.set(MAIN_SECT, AWS_S3_SECRET_KEY, self.s3_key)
+
+            # Save pre-configured logs
             for clog in self.configured_logs:
                 conf.add_section(clog.name)
                 if clog.token:
@@ -1904,6 +2025,7 @@ class Config(object):
                 conf.set(clog.name, PATH_PARAM, clog.path)
                 if clog.destination:
                     conf.set(clog.name, DESTINATION_PARAM, clog.destination)
+                conf.set(clog.name, SEND_S3_PARAM, str(clog.send_s3))
 
             self.metrics.save(conf)
 
@@ -1981,6 +2103,18 @@ class Config(object):
         if self.name == NOT_SET:
             self.name = self.hostname_required().split('.')[0]
         return self.name
+
+    def get_s3_bucket_name(self):
+        return self.s3_bucket
+
+    def get_s3_account_id(self):
+        return self.s3_account
+
+    def get_s3_secret_key(self):
+        return self.s3_key
+
+    def has_s3_enabled(self):
+        return True if True in [i.send_s3 for i in self.configured_logs] else False
 
     # The method gets all parameters of given type from argument list,
     # checks for their format and returns list of values of parameters
@@ -2158,6 +2292,8 @@ class Config(object):
 
 config = Config()
 
+# Amazon S3 backend instance
+amazon_s3_backend = None
 
 def do_request(conn, operation, addr, data=None, headers={}):
     log.debug('Domain request: %s %s %s %s', operation, addr, data, headers)
@@ -2394,6 +2530,31 @@ def get_cache_dir():
         os.makedirs(path)
     return path
 
+"""
+Cache manipulation logic.
+
+Currently, hosts and tokens cache looks like this:
+
+"host_keys": {
+    "HOST1": "KEY1",
+    "HOST2": "KEY2",
+    ...
+}
+
+"log_tokens" : {
+    "logset_key1": {
+        "log_name1" : "token1",
+        "log_name2" : "token2"
+     },
+
+    "logset_key2": {
+        "log_name3" : "token3",
+        "log_name4" : "token4"
+     },
+     ...
+}
+
+"""
 
 def get_cache_filename():
     """Gets full cache filename.
@@ -2408,10 +2569,8 @@ def load_cache():
     cache_filename = get_cache_filename()
     try:
         if os.path.exists(cache_filename):
-            fcache = open(cache_filename, 'r')
-            cache_content = fcache.read()
-            fcache.close()
-            return json_loads(cache_content)
+            with open(cache_filename, "r") as cache_file:
+                    return json_loads(cache_file.read())
     except ValueError:
         log.warn("Could not read cache, ignoring")
     except IOError:
@@ -2425,12 +2584,51 @@ def save_cache(cache):
     """
     cache_filename = get_cache_filename()
     try:
-        fcache = open(cache_filename, 'w')
-        fcache.write(json_dumps(cache, indent=4, separators=(',', ': ')))
-        fcache.close()
+        with open(cache_filename, 'w') as cache_file:
+                cache_file.write(json_dumps(cache, indent=4, separators=(',', ': ')))
     except IOError:
         log.warning("Cannot write to %s, consider adjusting XDG_CACHE_HOME" % cache_filename)
 
+def get_host_key_by_name_from_cache(cache, host_name):
+    if not cache or not host_name:
+        return ''
+
+    if host_name in cache['host_keys']:
+        return cache['host_keys'][host_name]
+
+def get_host_name_by_key_from_cache(cache, host_key):
+    if not cache or not host_key:
+        return ''
+
+    hosts = cache['host_keys']
+    for host_name in hosts:
+        keys = hosts[host_name]
+        if host_key in keys:
+            return host_name
+    return ''
+
+def save_host_to_cache(cache, host_name, host_key):
+    if cache and host_name and host_key:
+        cache['host_keys'][host_name] = host_key
+
+
+def get_log_token_from_cache(cache, logset_key, log_name):
+    if not cache or not logset_key or not log_name:
+        return ''
+    token = ''
+    tokens = cache['log_tokens']
+    if logset_key in tokens:
+        logset = tokens[logset_key]
+        if log_name in logset:
+            token = logset[log_name]
+    return token
+
+
+def save_log_token_to_cache(cache, logset_key, log_name, token):
+    if cache and logset_key and log_name:
+        if logset_key not in cache['log_tokens']:
+            cache['log_tokens'][logset_key] = {}
+        cache['log_tokens'][logset_key][log_name] = token
 
 def request_hosts(load_logs=False):
     """Returns list of registered hosts.
@@ -2452,8 +2650,9 @@ def get_or_create_host(cache, host_name):
     """Gets or creates a new host and refreshes the cache if necessary
     """
     # Find the host in cache
-    if host_name in cache['host_keys']:
-        return cache['host_keys'][host_name]
+    host_key = get_host_key_by_name_from_cache(cache, host_name)
+    if host_key:
+        return host_key
 
     # Retrieve the host via API
     account_hosts = request_hosts(load_logs=True)
@@ -2463,12 +2662,17 @@ def get_or_create_host(cache, host_name):
         # If it does not exist, create a new one
         host = create_host(host_name, '', '', '', '')
 
-    host_key = host['key']
-    cache['host_keys'][host_name] = host_key
+    if host:
+        # Got a new host object - save it to the cache
+        host_key = host['key']
+        save_host_to_cache(cache, host_name, host_key)
+    else:
+        log.error('Cannot create/obtain host object %s' % host_name)
+
     return host_key
 
 
-def get_or_create_log(cache, host_key, log_name, destination):
+def get_or_create_log(cache, host_key, log_name):
     """ Gets or creates a log for the host given. It returns logs's token or
     None.
     """
@@ -2476,8 +2680,9 @@ def get_or_create_log(cache, host_key, log_name, destination):
         return None
 
     # Find log in cache
-    if destination in cache['log_tokens']:
-        return cache['log_tokens'][destination]
+    token = get_log_token_from_cache(cache, host_key, log_name)
+    if token:
+        return token
 
     # Retrieve the log via API
     account_hosts = request_hosts(load_logs=True)
@@ -2493,7 +2698,7 @@ def get_or_create_log(cache, host_key, log_name, destination):
 
     token = xlog.get('token', None)
     if token:
-        cache['log_tokens'][destination] = token
+        save_log_token_to_cache(cache, host_key, log_name, token)
     return token
 
 
@@ -2643,10 +2848,11 @@ def start_followers(default_transport):
         log_path = cl.path
         log_name = cl.name
         log_token = cl.token
+        send_s3 = cl.send_s3
         # Construct response-like item which has the same structure as ones
         # returned by LE Server.
         logs.append(
-            {'type': 'token', 'name': log_name, 'filename': log_path, 'key': '', 'token': log_token,
+            {'type': 'token', 'name': log_name, 'filename': log_path, 'key': '', 'token': log_token, 'send_s3': send_s3,
                      'follow': 'true'})
 
     available_filters = {}
@@ -2667,6 +2873,9 @@ def start_followers(default_transport):
                       config.filters, sys.exc_info()[1])
             log.error('Details: %s', traceback.print_exc(sys.exc_info()))
 
+    global amazon_s3_backend
+    amazon_s3_backend = AmazonS3ArchivingBackend(False, False, False, config)
+
     # Start followers
     for l in logs:
         # Note! Token-type logs have follow param == false by default, so we need to
@@ -2678,6 +2887,7 @@ def start_followers(default_transport):
             log_token = ''
             if l['type'] == 'token':
                 log_token = l['token']
+            log_send_s3 = l['send_s3'] if 'send_s3' in l else 'false'
 
             # Do not start a follower for a log with absent filepath.
             if not check_file_name(log_filename):
@@ -2693,7 +2903,8 @@ def start_followers(default_transport):
 
             if log_token or config.datahub:
                 formatter = formatters.FormatSyslog(
-                    config.hostname, log_name, log_token)
+                    config.hostname, log_name, log_token, config.datahub)  # Do not prepend the token if
+                                                                           # data goes to DH
                 transport = default_transport.get()
             elif log_key:
                 endpoint = Domain.API
@@ -2717,8 +2928,9 @@ def start_followers(default_transport):
                 continue
 
             # Instantiate the follower
+            # None is the TAG, which currently is not used
             follower = Follower(log_filename, entry_filter, transport,
-                                formatter)
+                                formatter, log_token, None, log_send_s3.lower() == 'true', amazon_s3_backend)
             followers.append(follower)
     return (followers, transports)
 
@@ -2745,12 +2957,27 @@ def create_configured_logs(configured_logs):
             continue
 
         if clog.destination and not clog.token:
-            try:
-                (hostname, logname) = clog.destination.split('/', 1)
-            except ValueError:
+            hostname = ''
+
+            # Default value is the name of the section, unless overridden by 'destination' parameter.
+            logname = clog.name
+
+            split_values = clog.destination.split('/', 1)
+            if split_values:
+                hostname = split_values[0]  # The first item in the sequence means the host.
+
+                if len(split_values) > 1:  # We have also logname defined within the 'destination' parameter.
+                    if split_values[1]:
+                        logname = split_values[1]
+
+            if not hostname:
                 log.error('Ignoring section %s since `%s\' does not contain host' % (clog.name, DESTINATION_PARAM))
+                continue  # Can't use this item, since it does not contain the host name, so, move to the next one.
+
             host_key = get_or_create_host(cache, hostname)
-            token = get_or_create_log(cache, host_key, logname, clog.destination)
+            if host_key:
+                token = get_or_create_log(cache, host_key, logname)
+
             if not token:
                 log.error('Ignoring section %s, cannot create log' % clog.name)
 
@@ -2775,6 +3002,7 @@ def cmd_monitor(args):
     # Ensure all configured logs are created
     if config.configured_logs and not config.datahub:
         create_configured_logs( config.configured_logs)
+    config.save()
 
     if config.daemon:
         daemonize()
@@ -2811,6 +3039,11 @@ def cmd_monitor(args):
         stats.cancel()
     if smetrics:
         smetrics.cancel()
+
+    # Stop S3 archiving backend, if one is instantiated
+    if amazon_s3_backend is not None:
+        amazon_s3_backend.shutdown()
+
     # Close followers
     for follower in followers:
         follower.close()
@@ -3069,12 +3302,9 @@ def cmd_pull(args):
         params['filter'] = args[2]
     if len(args) > 3:
         try:
-            limit = int(args[3])
+            params['limit'] = int(args[3])
         except ValueError:
             die('Error: Limit must be integer')
-        if limit < 1:
-            die('Limit must be above 0')
-        params['limit'] = limit
 
     pull_request(addr, params)
 

@@ -1,0 +1,71 @@
+*** Settings ***
+Library    AgentActionsProxy.py
+Library    OperatingSystem
+
+
+
+*** Test Cases ***
+Git Downloading
+    Given User removes previous Agent destination directory "/tmp/le_agent" if it exists
+    Given User gets link to Github repository "https://github.com/logentries/le.git"
+    And User creates destination directory "/tmp/le_agent"
+    When user downloads the Agent from GitHub 
+    Then result of downloading must be "success"
+    Directory "/tmp/le_agent" should be not empty
+
+Agent Installing
+    Given User removes previous Agent files, if they are exist, from "/usr/share/logentries" directory
+    When User copies Agent files from "/tmp/le_agent" to destination directory "/usr/share/logentries"
+    Then directory "/usr/share/logentries" should be not empty
+
+
+Agent Registration
+    Given User invokes the Agent with "register" command, passing user key 5ebc4529-68a3-4634-8b8c-067df0a0add4
+    User navigates to "/etc/le" folder and gets the host key from "config" file
+    When User checks Agent registration on the site using the host key
+    Then result of registration check must be "success"
+
+
+*** Keywords ***
+User removes previous Agent destination directory "${expression}" if it exists
+    Remove Directory    ${expression}    "Recursive"
+
+User gets link to Github repository "${expression}"
+    Set github repository    ${expression}
+
+User creates destination directory "${expression}"
+    Check and set download destination    ${expression}
+
+User downloads the Agent from GitHub
+    Download agent
+
+Result of downloading must be "${result}"
+    Download result must be    ${result}
+
+Directory "${expression}" should be not empty
+    Directory Should Not Be Empty    ${expression}
+
+User removes previous Agent files, if they are exist, from "${src_path}" directory
+    Remove Files    ${src_path}/*.py    ${src_path}/*.pyc
+    Remove File    /etc/le/config
+    Run    rm /usr/bin/le
+
+User copies Agent files from "${source_dir}" to destination directory "${dest_dir}"
+    Create Directory    ${dest_dir}
+    Copy Files    ${source_dir}/src/*.py    ${dest_dir}
+    Run    ln -s /usr/share/logentries/le.py /usr/bin/le
+
+User invokes the Agent with "register" command, passing e-mail "${e_mail}" and password "${password}" to it
+    Register Agent With EMail    ${e_mail}    ${password}
+
+Given User invokes the Agent with "register" command, passing user key ${user_key}
+    Register Agent    ${user_key}
+
+User navigates to "${config_path}" folder and gets the host key from "${config_name}" file
+    Get host key from config    ${config_path}    ${config_name}
+
+When User checks Agent registration on the site using the host key
+    Check Agent registration on site
+
+Then result of registration check must be "${result}"
+    Registration result must be    ${result}

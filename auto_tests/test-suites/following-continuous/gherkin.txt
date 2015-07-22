@@ -1,0 +1,37 @@
+*** Settings ***
+Library    AgentActionsProxy.py
+Library    OperatingSystem
+
+
+
+*** Test Cases ***
+Continuous Agent Monitoring
+    User creates file "/tmp/my_test_feed.log"
+    When User invokes the Agent with command "follow" and path to "/tmp/my_test_feed.log"
+    Then Agent must report "Will follow /tmp/my_test_feed.log as my_test_feed.log"
+    Log entry "my_test_feed.log" must be present on site within the current log set
+    User starts supplying text from feed "http://www.lipsum.com/feed/html" to "/tmp/my_test_feed.log" for 10 seconds
+    When User gets contents of "my_test_feed.log" from the server
+    Then the log must be not empty
+
+*** Keywords ***
+User creates file "${path_to_file}"
+    Create log file    ${path_to_file}
+
+User invokes the Agent with command "follow" and path to "${path_to_file}"
+    Invoke Agent to follow   ${path_to_file}
+
+Agent must report "${expression}"
+    Match agent output with pattern    ${expression}
+
+Log entry "${log_name}" must be present on site within the current log set
+    Check log presence on site    ${log_name}
+
+User starts supplying text from feed "${feed_uri}" to "${log_name}" for ${feed_time} seconds
+    Populate file from feed continuously    ${feed_uri}    ${log_name}    ${feed_time}
+
+User gets contents of "${log_name}" from the server
+    Pull log from server   ${log_name}
+
+The log must be not empty
+    Check whether log is not empty

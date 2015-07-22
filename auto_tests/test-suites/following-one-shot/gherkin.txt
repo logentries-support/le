@@ -1,0 +1,25 @@
+*** Settings ***
+Library    AgentActionsProxy.py
+Library    OperatingSystem
+
+
+
+*** Test Cases ***
+File Following
+    User creates file "/tmp/my_test.log"
+    When User invokes the Agent with command "follow" and path to "/tmp/my_test.log"
+    Then Agent must report "Will follow /tmp/my_test.log as my_test.log"
+    Log entry "my_test.log" must be present on site within the current log set
+
+*** Keywords ***
+User creates file "${path_to_file}"
+    Create log file    ${path_to_file}
+
+User invokes the Agent with command "follow" and path to "${path_to_file}"
+    Invoke Agent to follow   ${path_to_file}
+
+Agent must report "${expression}"
+    Match agent output with pattern    ${expression}
+
+Log entry "${log_name}" must be present on site within the current log set
+    Check log presence on site    ${log_name}

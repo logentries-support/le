@@ -1,0 +1,21 @@
+---
+driver:
+  name: vagrant
+
+provisioner:
+  name: chef_solo
+
+platforms:
+  - name: ubuntu-12.04
+    driver:
+      provider: virtualbox
+
+suites:
+  - name: default
+    driver_config:
+      synced_folders: [
+        ["/test-server/test-suites", "/tmp/test-suites"]
+      ]
+    run_list:
+      - recipe[LinuxAgentTesting::default]
+    attributes:
