@@ -50,15 +50,18 @@ class AmazonS3Uploader(StoppableAsyncTask):
                     if log_item.callback_fn is not None:
                         log_item.callback_fn(file_path, destination_path)
 
-                except Exception as e:
+                except Exception, e:
                     log.error(e.message)
                     if log_item not in failed_logs:
                         failed_logs.append(log_item)
 
             self.logs_to_send.extend(failed_logs)
 
-        except Exception as e:
-            message = e.message if e.message != '' else e.strerror
+        except Exception, e:
+            if hasattr(e, 'strerror'):
+                message = e.strerror
+            else:
+                message = e.message
             log.error('General logs sending thread error: %s' % message)
 
     def stop(self):

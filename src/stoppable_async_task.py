@@ -1,4 +1,5 @@
 import threading
+import sys
 
 
 class StoppableAsyncTask(threading.Thread):
@@ -6,11 +7,17 @@ class StoppableAsyncTask(threading.Thread):
         threading.Thread.__init__(self)
         self.daemon = True
         self.stop_event = threading.Event()
+
+        if sys.version_info < (2, 6):
+            self.need_to_stop_signal = self.stop_event.isSet
+        else:
+            self.need_to_stop_signal = self.stop_event.is_set
+
         self.fn = fn
         self.args = args
 
     def run(self):
-        while not self.stop_event.is_set():
+        while not self.need_to_stop_signal():
             self.fn(*self.args)
 
     def stop(self):
@@ -21,4 +28,4 @@ class StoppableAsyncTask(threading.Thread):
         threading.Thread.join(self, timeout)
 
     def is_stopped(self):
-        return self.stop_event.is_set()
+        return self.need_to_stop_signal()
