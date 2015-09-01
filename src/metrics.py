@@ -8,10 +8,17 @@ import sys
 import threading
 import time
 import traceback
-import uuid
+
+# If we're running Python 2.4, then we may not have UUID module to import.
+has_uuid_module = True
+try:
+    import uuid
+except ImportError:
+    has_uuid_module = False
 
 import formatters
 from utils import report
+from utils import generate_uuid
 from __init__ import __version__
 
 # Try to import psutils
@@ -524,11 +531,11 @@ class Metrics(object):
         for x in self._items:
             try:
                 x.collect()
-            except Exception as e:
+            except Exception, e:
                 # Make sure we don't propagate any unexpected exceptions
                 # Typically `permission denied' on hard-ended systems
                 if self._debug:
-                    report("Warning: `%s'" % e)
+                    report("Warning: `%s'" % e.message)
                     report(''.join(traceback.format_tb(sys.exc_info()[2])))
 
         self._schedule(ethalon)
@@ -645,7 +652,13 @@ if __name__ == '__main__':
         conf.__dict__[VCPU] = 'core'
         conf.__dict__[NET] = 'sum all'
         conf.__dict__[DISK] = 'sum all'
-        conf.__dict__[TOKEN] = uuid.uuid4()
+
+        if has_uuid_module:
+            uuid_text = uuid.uuid4()
+        else:
+            uuid_text = generate_uuid()
+        conf.__dict__[TOKEN] = uuid_text
+
         metrics = Metrics(conf, None,
                 formatters.FormatSyslog('', 'le', ''), True)
         metrics.start()

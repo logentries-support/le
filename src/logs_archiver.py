@@ -42,14 +42,14 @@ class LogsArchiver(StoppableAsyncTask):
         src = None
         dst = None
         try:
-            src = open(file_path, 'rb')
-            dst = gzip.open(file_path + ARCH_FILE_EXTENSION, 'wb')
-            dst.writelines(src)
-            return file_path + ARCH_FILE_EXTENSION
-        except Exception as e:
-            log.error(e.message)
-            log.error(e.message)
-            raise
+            try:
+                src = open(file_path, 'rb')
+                dst = gzip.open(file_path + ARCH_FILE_EXTENSION, 'wb')
+                dst.writelines(src)
+                return file_path + ARCH_FILE_EXTENSION
+            except Exception, e:
+                log.error(e.message)
+                raise
         finally:
             src.close()
             dst.close()
@@ -78,7 +78,9 @@ class LogsArchiver(StoppableAsyncTask):
 
                 log_item = self.logs_to_compress.pop()
                 filename = log_item.file_path
-                archive = filename + ARCH_FILE_EXTENSION if not filename.endswith(ARCH_FILE_EXTENSION) else filename
+                archive = filename
+                if not filename.endswith(ARCH_FILE_EXTENSION):
+                    archive += ARCH_FILE_EXTENSION
 
                 try:
                     log.info('Compressing %s...' % filename)
@@ -91,22 +93,24 @@ class LogsArchiver(StoppableAsyncTask):
                     if log_item.callback_fn is not None:
                         log_item.callback_fn(filename, compressed_file_path)
 
-                except Exception as e:
-                    msg = e.message if e.message != '' else e.strerror
+                except Exception, e:
+                    if hasattr(e, 'strerror'):
+                        msg = e.strerror
+                    else:
+                        msg = e.message
                     log.error('Failed to compress %s. Error: %s' % (filename, msg))
                     if log_item not in failed_logs:
                         failed_logs.append(log_item)
                     try:
                         if os.path.exists(archive):
                             os.remove(archive)
-                    except Exception as ex:
+                    except Exception, ex:
                         log.error(ex.message)
 
             self.logs_to_compress.extend(failed_logs)
 
-        except Exception as e:
-            message = e.message if e.message != '' else e.strerror
-            log.error('General logs compressing thread error: %s' % message)
+        except Exception, e:
+            log.error('General logs compressing thread error: %s' % e.message)
 
     def stop(self):
         StoppableAsyncTask.stop(self)
