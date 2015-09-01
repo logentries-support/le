@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import sys
+import uuid
 from backports import match_hostname, CertificateError
 
 import logging
@@ -15,14 +16,7 @@ import logging
 import time
 import datetime
 import _strptime
-import commands
 
-# If we're running Python 2.4, then we may not have UUID module to import.
-has_uuid_module = True
-try:
-    import uuid
-except ImportError:
-    has_uuid_module = False
 
 __author__ = 'Logentries'
 
@@ -507,17 +501,10 @@ def uuid_parse(text):
     """Returns uuid given or None in case of syntax error.
     """
     try:
-        if has_uuid_module:
-            return uuid.UUID(text).__str__()
-        else:
-            if is_uuid(text):
-                return text
+        return uuid.UUID(text).__str__()
     except ValueError:
         return None
 
-def generate_uuid():
-    # This is kinda hack to generate an UUID even if we do not have uuid module available.
-    return commands.getoutput('uuidgen')
 
 #
 # Authority certificate

@@ -68,6 +68,7 @@ LE_DEFAULT_NON_SSL_PORT = 10000
 
 
 class Domain(object):
+
     """ Logentries domains. """
     # General domains
     MAIN = 'logentries.com'
@@ -89,7 +90,7 @@ LOG_ROOT = '/var/log'
 # Timeout after server connection fail. Might be a temporary network
 # failure.
 SRV_RECON_TIMEOUT = 10  # in seconds
-SRV_RECON_TO_MIN = 1  # in seconds
+SRV_RECON_TO_MIN = 1   # in seconds
 SRV_RECON_TO_MAX = 10  # in seconds
 
 # Timeout after invalid server response. Might be a version mishmash or
@@ -204,6 +205,7 @@ def print_usage(version_only=False):
 
     sys.exit(EXIT_HELP)
 
+
 #
 # Libraries
 #
@@ -266,11 +268,12 @@ log.addHandler(stream_handler)
 
 LOG_LOCAL_LOG_FILE = '/var/log/logentries-agent.log'
 
+local_var_logger = logging.getLogger(LOG_LE_AGENT)
 local_var_handler = logging.FileHandler(LOG_LOCAL_LOG_FILE)
 formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 local_var_handler.setFormatter(formatter)
-local_var_handler.setLevel(logging.ERROR)
-log.addHandler(local_var_handler)
+local_var_logger.addHandler(local_var_handler)
+local_var_logger.setLevel(logging.ERROR)
 
 def debug_filters(msg, *args):
     if config.debug_filters:
@@ -636,6 +639,7 @@ def system_detect(details):
                 pass
     return system_info
 
+
 # Identified ranges
 
 SEC = 1000
@@ -787,7 +791,7 @@ def parse_timestamp_range(text):
     if text in ['y', 'yesterday']:
         yesterday = int(time.mktime(
             (datetime.datetime(now.year, now.month, now.day) -
-             datetime.timedelta(days=1)).timetuple())) * 1000
+                datetime.timedelta(days=1)).timetuple())) * 1000
         return [yesterday, yesterday + DAY]
 
     # Range spec
@@ -877,6 +881,7 @@ def retrieve_account_key():
 
 
 class Stats(object):
+
     """Collects statistics about the system work load.
     """
 
@@ -1256,6 +1261,7 @@ class Stats(object):
 
 
 class Follower(object):
+
     """
     The follower keeps an eye on the file specified and sends new events to the
     logentries infrastructure.  """
@@ -1458,6 +1464,7 @@ class Follower(object):
 
 
 class Transport(object):
+
     """Encapsulates simple connection to a remote host. The connection may be
     encrypted. Each communication is started with the preamble."""
 
@@ -1641,6 +1648,7 @@ class Transport(object):
 
 
 class DefaultTransport(object):
+
     def __init__(self, xconfig):
         self._transport = None
         self._config = xconfig
@@ -1675,6 +1683,7 @@ class DefaultTransport(object):
 
 
 class ConfiguredLog(object):
+
     def __init__(self, name, token, destination, path, send_s3):
         self.name = name
         self.token = token
@@ -1693,6 +1702,7 @@ class ConfiguredLog(object):
 
 
 class Config(object):
+
     def __init__(self):
         self.config_dir_name = self.get_config_dir()
         self.config_filename = self.config_dir_name + LE_CONFIG
@@ -1892,57 +1902,42 @@ class Config(object):
         # bad format and will throw an error during parsing.
 
         bad_appname_patterns = [
-            (re.compile('\[\]' + os.linesep), '[%s]', '[]'),  # [] - empty section name
-            (re.compile('^\[.*[^\]]' + os.linesep), '[%s]', '[]'),  # ] is missing, like "[sect_name"
-            (re.compile('^[^\[].*\]' + os.linesep), '[%s]', '[]')  # [ is missing, like "sect_name]"
+            (re.compile('\[\]' + os.linesep), '[%s]', '[]'),           # [] - empty section name
+            (re.compile('^\[.*[^\]]' + os.linesep), '[%s]', '[]'),     # ] is missing, like "[sect_name"
+            (re.compile('^[^\[].*\]' + os.linesep), '[%s]', '[]')      # [ is missing, like "sect_name]"
         ]
 
-        conf_raw = None
         try:
-            try:
-                conf_raw = open(path_to_config, 'r')
+            with open(path_to_config, 'r') as conf_raw:
                 lines_buffer = conf_raw.readlines()
-            except IOError, e:
-                if need_to_log_errors:
-                    log.error('Cannot open/read the config file. Error: %s' % e.strerror)
-                return
-        finally:
-            if conf_raw is not None:
-                conf_raw.close()
 
-        # This flag tells whether the config has been modified within the method
-        # and needs to be saved back to the file.
-        conf_modified = False
+            # This flag tells whether the config has been modified within the method
+            # and needs to be saved back to the file.
+            conf_modified = False
 
-        fixed_config = []
-        for line in lines_buffer:
-            for pattern in bad_appname_patterns:
-                matcher, repl, tokens = pattern
-                if matcher.match(line):
-                    if not conf_modified:
-                        conf_modified = True
-                    sect_name = Config._extract_string(line, tokens)
-                    replace_line = repl % sect_name
-                    line = line.replace(os.linesep, '')
-                    if need_to_log_errors:
-                        local_var_logger.error('%s in config has bad format and will be replaced with %s' %
+            fixed_config = []
+            for line in lines_buffer:
+                for pattern in bad_appname_patterns:
+                    matcher, repl, tokens = pattern
+                    if matcher.match(line):
+                        if not conf_modified:
+                            conf_modified = True
+                        sect_name = Config._extract_string(line, tokens)
+                        replace_line = repl % (sect_name if sect_name else ' ')
+                        line = line.replace(os.linesep, '')
+                        if need_to_log_errors:
+                            local_var_logger.error('%s in config has bad format and will be replaced with %s' %
                                                (line, replace_line))
-                    line = replace_line
-                    break
-            fixed_config.append(line)
+                        line = replace_line
+                        break
+                fixed_config.append(line)
 
-        if conf_modified:
-            conf_to_write = None
-            try:
-                try:
-                    conf_to_write = open(path_to_config, 'w')
+            if conf_modified:
+                with open(path_to_config, 'w') as conf_raw:
                     conf_raw.writelines(fixed_config)
-                except IOError, e:
-                    if need_to_log_errors:
-                        log.error('Cannot write the config file. Error: %s' % e.strerror)
-            finally:
-                if conf_to_write is not None:
-                    conf_to_write.close()
+        except IOError as e:
+            if need_to_log_errors:
+                local_var_logger.error('Cannot open/check/write the config file: %s' % e.message)
 
     def load_configured_logs(self, conf):
         global log
@@ -1971,13 +1966,13 @@ class Config(object):
                 except ConfigParser.NoOptionError:
                     pass
 
-                send_s3 = 'False'
+                send_s3 = False
                 try:
                     send_s3 = conf.get(name, SEND_S3_PARAM)
                 except ConfigParser.NoOptionError:
                     pass
 
-                configured_log = ConfiguredLog(name, token, destination, path, send_s3.lower() == 'true')
+                configured_log = ConfiguredLog(name, token, destination, path, send_s3)
 
                 self.configured_logs.append(configured_log)
 
@@ -2119,7 +2114,7 @@ class Config(object):
         return self.s3_key
 
     def has_s3_enabled(self):
-        return True in [i.send_s3 for i in self.configured_logs]
+        return True if True in [i.send_s3 for i in self.configured_logs] else False
 
     # The method gets all parameters of given type from argument list,
     # checks for their format and returns list of values of parameters
@@ -2295,12 +2290,10 @@ class Config(object):
             die("Do not specify --local and --force-domain at the same time.")
         return args
 
-
 config = Config()
 
 # Amazon S3 backend instance
 amazon_s3_backend = None
-
 
 def do_request(conn, operation, addr, data=None, headers={}):
     log.debug('Domain request: %s %s %s %s', operation, addr, data, headers)
@@ -2537,7 +2530,6 @@ def get_cache_dir():
         os.makedirs(path)
     return path
 
-
 """
 Cache manipulation logic.
 
@@ -2564,7 +2556,6 @@ Currently, hosts and tokens cache looks like this:
 
 """
 
-
 def get_cache_filename():
     """Gets full cache filename.
     """
@@ -2576,44 +2567,27 @@ def load_cache():
     """Loads or creates cache.
     """
     cache_filename = get_cache_filename()
-    cache_file = None
-    cache_obj = {'host_keys': {}, 'log_tokens': {}}
     try:
-        try:
-            if os.path.exists(cache_filename):
-                cache_file = open(cache_filename, "r")
-                cache_obj = json_loads(cache_file.read())
-        except ValueError:
-            log.warn("Could not parse the cache file, ignoring")
-        except IOError:
-            log.warn("Error while reading the cache file, ignoring")
-    finally:
-        if cache_file is not None:
-            cache_file.close()
+        if os.path.exists(cache_filename):
+            with open(cache_filename, "r") as cache_file:
+                    return json_loads(cache_file.read())
+    except ValueError:
+        log.warn("Could not read cache, ignoring")
+    except IOError:
+        log.warn("Error while reading cache, ignoring")
 
-    return cache_obj
+    return {'host_keys':{}, 'log_tokens':{}}
 
 
 def save_cache(cache):
     """Saves cache given.
     """
     cache_filename = get_cache_filename()
-    cache_file = None
     try:
-        try:
-            cache_file = open(cache_filename, 'w')
-            cache_file.write(json_dumps(cache, indent=4, separators=(',', ': ')))
-        except Exception, e:
-            if hasattr(e, 'strerror'):
-                message = e.strerror
-            else:
-                message = e.message
-            log.warning(
-                "Cannot write to %s, consider adjusting XDG_CACHE_HOME. Error: %s" % (cache_filename, message))
-    finally:
-        if cache_file is not None:
-            cache_file.close()
-
+        with open(cache_filename, 'w') as cache_file:
+                cache_file.write(json_dumps(cache, indent=4, separators=(',', ': ')))
+    except IOError:
+        log.warning("Cannot write to %s, consider adjusting XDG_CACHE_HOME" % cache_filename)
 
 def get_host_key_by_name_from_cache(cache, host_name):
     if not cache or not host_name:
@@ -2621,7 +2595,6 @@ def get_host_key_by_name_from_cache(cache, host_name):
 
     if host_name in cache['host_keys']:
         return cache['host_keys'][host_name]
-
 
 def get_host_name_by_key_from_cache(cache, host_key):
     if not cache or not host_key:
@@ -2633,7 +2606,6 @@ def get_host_name_by_key_from_cache(cache, host_key):
         if host_key in keys:
             return host_name
     return ''
-
 
 def save_host_to_cache(cache, host_name, host_key):
     if cache and host_name and host_key:
@@ -2657,7 +2629,6 @@ def save_log_token_to_cache(cache, logset_key, log_name, token):
         if logset_key not in cache['log_tokens']:
             cache['log_tokens'][logset_key] = {}
         cache['log_tokens'][logset_key][log_name] = token
-
 
 def request_hosts(load_logs=False):
     """Returns list of registered hosts.
@@ -2790,7 +2761,6 @@ def cmd_register(args):
         if config.std_all or logx['default'] == '1':
             request_follow(logx['filename'], logx['name'], logx['type'])
 
-
 # The function checks for 2 things: 1) that the path is not empty;
 # 2) the path starts with '/' character which indicates that the log has
 # a "physical" path which starts from filesystem root.
@@ -2883,7 +2853,7 @@ def start_followers(default_transport):
         # returned by LE Server.
         logs.append(
             {'type': 'token', 'name': log_name, 'filename': log_path, 'key': '', 'token': log_token, 'send_s3': send_s3,
-             'follow': 'true'})
+                     'follow': 'true'})
 
     available_filters = {}
     filter_filenames = default_filter_filenames
@@ -2917,10 +2887,7 @@ def start_followers(default_transport):
             log_token = ''
             if l['type'] == 'token':
                 log_token = l['token']
-
-            log_send_s3 = False
-            if 'send_s3' in l:
-                log_send_s3 = l['send_s3']
+            log_send_s3 = l['send_s3'] if 'send_s3' in l else 'false'
 
             # Do not start a follower for a log with absent filepath.
             if not check_file_name(log_filename):
@@ -2937,7 +2904,7 @@ def start_followers(default_transport):
             if log_token or config.datahub:
                 formatter = formatters.FormatSyslog(
                     config.hostname, log_name, log_token, config.datahub)  # Do not prepend the token if
-                # data goes to DH
+                                                                           # data goes to DH
                 transport = default_transport.get()
             elif log_key:
                 endpoint = Domain.API
@@ -2963,7 +2930,7 @@ def start_followers(default_transport):
             # Instantiate the follower
             # None is the TAG, which currently is not used
             follower = Follower(log_filename, entry_filter, transport,
-                                formatter, log_token, None, log_send_s3, amazon_s3_backend)
+                                formatter, log_token, None, log_send_s3.lower() == 'true', amazon_s3_backend)
             followers.append(follower)
     return (followers, transports)
 
@@ -2986,8 +2953,7 @@ def create_configured_logs(configured_logs):
     cache = load_cache()
     for clog in configured_logs:
         if not clog.destination and not clog.token:
-            log.error('Ignoring section {} as neither {} nor {} is specified'.format(clog.name, TOKEN_PARAM,
-                                                                                     DESTINATION_PARAM))
+            log.error('Ignoring section {} as neither {} nor {} is specified'.format(clog.name, TOKEN_PARAM, DESTINATION_PARAM))
             continue
 
         if clog.destination and not clog.token:
@@ -3035,7 +3001,7 @@ def cmd_monitor(args):
 
     # Ensure all configured logs are created
     if config.configured_logs and not config.datahub:
-        create_configured_logs(config.configured_logs)
+        create_configured_logs( config.configured_logs)
     config.save()
 
     if config.daemon:
@@ -3051,7 +3017,7 @@ def cmd_monitor(args):
     formatter = formatters.FormatSyslog(config.hostname, 'le',
                                         config.metrics.token)
     smetrics = metrics.Metrics(config.metrics, default_transport,
-                               formatter, config.debug_metrics)
+                                formatter, config.debug_metrics)
     smetrics.start()
 
     followers = []
@@ -3260,7 +3226,7 @@ def cmd_ls_ips(ags):
     for name in [Domain.MAIN, Domain.API, Domain.DATA, Domain.PULL]:
         for info in socket.getaddrinfo(name, None, 0, 0, socket.IPPROTO_TCP):
             ip = info[4][0]
-            print >> sys.stderr, '%-16s %s' % (ip, name)
+            print >>sys.stderr, '%-16s %s' % (ip, name)
             l.append(ip)
     print l
     print ' '.join(l)

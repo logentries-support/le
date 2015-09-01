@@ -1,27 +1,12 @@
 import os
 import logging
-import sys
+
+import boto
+from boto.s3.key import Key
+from boto.s3.connection import S3Connection
 
 LOG_LE_AGENT = 'logentries.com'
 log = logging.getLogger(LOG_LE_AGENT)
-
-boto_available = True
-if sys.version_info >= (2, 6):
-    try:
-        import boto
-        from boto.s3.key import Key
-        from boto.s3.connection import S3Connection
-    except ImportError, e:
-        log.warn('Cannot import boto package: %s. AWS S3 archiving feature will not be used. Please, install boto '
-                 'package by running "pip install boto" and restart the Agent' % e.message)
-        boto_available = False
-else:
-    version = sys.version_info
-    log.warn('Cannot import boto package for the current version of Python %d.%d.%d. To use AWS S3 archiving feature '
-             'you need Python interpreter at least of version 2.6. AWS S3 archiving feature will not be used.' %
-             (version[0], version[1], version[2]))  # Major, minor and micro components of the current version.
-    boto_available = False
-
 
 # AWS S3 related logic
 
@@ -29,10 +14,9 @@ class AmazonS3ConnectionWrapper:
     # AWS S3 - related error messages
     aws_s3_empty_credentials_err = 'Warning: one or more items of S3 credentials are empty. AWS S3 archiving won\'t ' \
                                    'be available.'
-    aws_s3_not_enabled = 'Note: Currently AWS S3 archiving is not enabled. If the Agent is currently not in local ' \
-                         'configuration mode, please set --use-config-log-paths=true to enable S3 archiving. If you do ' \
-                         'not have "boto" package installed, please, install it and restart the Agent.'
-    aws_s3_bad_credentials = 'Error: cannot perform required operation on S3 service, maybe given credentials ' \
+    aws_s3_not_enabled = 'Note: Currently AWS S3 archiving is not enabled as Agent is currently not in local ' \
+                         'configuration mode, please set --use-config-log-paths=true to enable S3 archiving.'
+    aws_s3_bad_credentials = 'Error: cannot perform required operation on S3 service , maybe given credentials ' \
                              'are invalid.'
     aws_s3_misc_error = 'Error while working with S3 service. Error: %s'
     aws_s3_no_bucket = 'Error: cannot get bucket %s. Make sure that the bucket exists and given credentials are valid.'
@@ -45,14 +29,12 @@ class AmazonS3ConnectionWrapper:
 
     def __init__(self, general_config, print_aws_statuses=True):
         try:
-            self.is_enabled = general_config.has_s3_enabled and boto_available
-
             self.account_id = general_config.get_s3_account_id()
             self.secret_key = general_config.get_s3_secret_key()
             self.bucket_name = general_config.get_s3_bucket_name()
+            self.print_aws_statuses = print_aws_statuses  # Determines whether the module should log AWS S3 error statuses
 
-            # Determines whether the module should log AWS S3 error statuses
-            self.print_aws_statuses = print_aws_statuses
+            self.is_enabled = general_config.has_s3_enabled
 
             self.s3_connection = None  # Connection to S3 service
             self.bucket = None  # Bucket instance
@@ -63,8 +45,8 @@ class AmazonS3ConnectionWrapper:
                     log.info(AmazonS3ConnectionWrapper.aws_s3_empty_credentials_err)
                     self.is_enabled = False
             else:
-                    log.info(AmazonS3ConnectionWrapper.aws_s3_not_enabled)
-        except Exception, e:
+                log.info(AmazonS3ConnectionWrapper.aws_s3_not_enabled)
+        except Exception as e:
             log.error(e.message)
 
     @staticmethod
@@ -115,10 +97,10 @@ class AmazonS3ConnectionWrapper:
         try:
             log.info('Login to AWS S3 Service started...')
             self.s3_connection = S3Connection(self.account_id, self.secret_key)
-        except boto.exception.S3ResponseError, e:
+        except boto.exception.S3ResponseError as e:
             log.info(AmazonS3ConnectionWrapper.aws_s3_misc_error % e.message)
             return False
-        except Exception, e:
+        except Exception as e:
             log.info(AmazonS3ConnectionWrapper.aws_s3_misc_error % e.message)
             return False
         return True
@@ -139,16 +121,16 @@ class AmazonS3ConnectionWrapper:
 
         try:
             self.bucket = self.s3_connection.get_bucket(bucket_name)
-        except boto.exception.S3ResponseError, e:
+        except boto.exception.S3ResponseError as e:
             if AmazonS3ConnectionWrapper.decode_error(e) == AmazonS3ConnectionWrapper.S3Errors.S3_NOT_FOUND:
                 # For this case it may be that the bucket does not exist
                 log.info(AmazonS3ConnectionWrapper.aws_s3_no_bucket % self.bucket_name)
             elif AmazonS3ConnectionWrapper.decode_error(e) == AmazonS3ConnectionWrapper.S3Errors.S3_ACCESS_DENIED:
                 # No permissions to access this bucket?
-                log.info(AmazonS3ConnectionWrapper.aws_s3_bad_permissions % self.bucket_name)
+                log.info(AmazonS3ConnectionWrapper.aws_s3_bad_permissions)
             if self.print_aws_statuses:
                 log.info('Status returned by AWS S3: ' + e.message)
-        except Exception, e:
+        except Exception as e:
             log.info(AmazonS3ConnectionWrapper.aws_s3_misc_error % e.message)
         return self.bucket
 
@@ -184,11 +166,11 @@ class AmazonS3ConnectionWrapper:
                 log.info(AmazonS3ConnectionWrapper.aws_s3_uploading_error % (log_full_path, file_size, uploaded_size))
                 return False
             return True
-        except boto.exception.S3ResponseError, e:
+        except boto.exception.S3ResponseError as e:
             log.info(AmazonS3ConnectionWrapper.aws_s3_misc_error % e.message)
             if self.print_aws_statuses:
                 log.info('Status returned by AWS S3: ' + e.message)
-        except Exception, e:
+        except Exception as e:
             log.info(AmazonS3ConnectionWrapper.aws_s3_misc_error % e.message)
         return False
 
