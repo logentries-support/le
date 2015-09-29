@@ -1932,11 +1932,12 @@ class Config(object):
                     if not conf_modified:
                         conf_modified = True
                     sect_name = Config._extract_string(line, tokens)
-                    replace_line = repl % sect_name
-                    line = line.replace(os.linesep, '')
+                    if not sect_name:
+                        sect_name = ' '  # the default value for missing section names.
+                    replace_line = repl % sect_name + os.linesep
                     if need_to_log_errors:
                         log.error('%s in config has bad format and will be replaced with %s' %
-                                               (line, replace_line))
+                                  (line.replace(os.linesep, ''), replace_line))
                     line = replace_line
                     break
             fixed_config.append(line)
@@ -1946,7 +1947,7 @@ class Config(object):
             try:
                 try:
                     conf_to_write = open(path_to_config, 'w')
-                    conf_raw.writelines(fixed_config)
+                    conf_to_write.writelines(fixed_config)
                 except IOError, e:
                     if need_to_log_errors:
                         log.error('Cannot write the config file. Error: %s' % e.strerror)
