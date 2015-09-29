@@ -1,6 +1,6 @@
 import socket
-from collections import deque
 import time
+import collections
 from utils import TimeUtils
 from logs_archiver import *
 from s3_comm_wrapper import *
@@ -26,6 +26,11 @@ LOG_FILE_MAX_DATES_DISTANCE_HOURS = 3  # 3 hours
 MAX_FILE_NAME_INDEX = 10  # Max. index for file rotating name generation.
 
 DATA_QUEUE_CONSUMER_EVT_TIMEOUT = 0.2  # 200 ms
+DATA_QUEUE_FREE_WAIT_PERIOD = 0.1  # 100 ms
+
+avail_features = {"event_is_set_2.6": sys.version_info >= (2, 6),
+                  "deque_k-v_params_2.7": sys.version_info >= (2, 7)}
+
 
 class AmazonS3ArchivingBackend:
 
@@ -44,8 +49,13 @@ class AmazonS3ArchivingBackend:
             self.archiving_backend = archiving_backend
             self.counter = 0
 
+            if not avail_features["event_is_set_2.6"]:
+                self.need_to_stop_evt_signal = self.need_to_stop.isSet
+            else:
+                self.need_to_stop_evt_signal = self.need_to_stop.is_set
+
         def run(self):
-            while not self.need_to_stop.is_set():
+            while not self.need_to_stop_evt_signal():
                 try:
                     self.data_consumer_event.wait(DATA_QUEUE_CONSUMER_EVT_TIMEOUT)
                     self.data_consumer_event.clear()
@@ -85,10 +95,14 @@ class AmazonS3ArchivingBackend:
 
                             self.archiving_backend.flush_data_to_local_log_file(item['log_name'], item['data'])
 
-                        except Exception as e:
+                        except Exception, e:
+                            if hasattr(e, 'strerror'):
+                                message = e.strerror
+                            else:
+                                message = e.message
                             log.error('Error: cannot write data to ' +
                                       self.archiving_backend.logs_map[item['log_name']]['local_log_file'] +
-                                      '. Error: ' + {True: e.message, False: e.strerror}[e.message != ''])
+                                      '. Error: ' + message)
                 except IndexError:
                     pass
                 except Exception:
@@ -106,7 +120,21 @@ class AmazonS3ArchivingBackend:
                  no_logs_compressing=False,  # This switch is used by several unit tests in local_backend_test.py
                  general_config=None,
                  die_on_errors=True):
-        self.data_queue = deque(maxlen=ARCHIVING_BACKEND_MAX_DATA_QUEUE_LENGTH)
+        self.is_enabled = False
+
+        if not avail_features["deque_k-v_params_2.7"]:
+            class dequeCompat(collections.deque):
+                def __init__(self, iterable=(), maxlen=None):
+                    super(collections.deque, self).__init__(iterable, maxlen)
+                    self._maxlen = maxlen
+
+                @property
+                def maxlen(self):
+                    return self._maxlen
+            self.data_queue = dequeCompat((), ARCHIVING_BACKEND_MAX_DATA_QUEUE_LENGTH)
+        else:
+            self.data_queue = collections.deque(maxlen=ARCHIVING_BACKEND_MAX_DATA_QUEUE_LENGTH)
+
         self.logs_map = {}
 
         # Get host's name - will be used as a part of temp. logs names
@@ -127,11 +155,14 @@ class AmazonS3ArchivingBackend:
             self.local_logs_dir = AmazonS3ArchivingBackend.check_or_create_local_logs_dir()
             if general_config is not None:
                 self.s3_comm_wrapper = AmazonS3ConnectionWrapper(general_config)
+                self.is_enabled = self.s3_comm_wrapper.is_enabled
 
-        except Exception as e:
+        except Exception, e:
             if not self.die_on_errors:
                 raise
             else:
+                # If we have chousen to use S3 archiving, but the class is misconfigured and 'die_on_errors' is set to
+                # True, then we write the error to log and kill the Agent here.
                 log.error(e.message)
                 sys.exit(-1)
 
@@ -179,11 +210,11 @@ class AmazonS3ArchivingBackend:
         else:
             if os.path.isfile(ARCHIVING_BACKEND_BASE_DIRECTORY):
                 raise Exception('Cannot create the directory for S3 local logs storing.'
-                                'there is a file named %s in %s' % (os.path.basename(ARCHIVING_BACKEND_BASE_DIRECTORY,
-                                                                    os.path.basedir(ARCHIVING_BACKEND_BASE_DIRECTORY))))
+                                'A file, named %s, resides by the specified path.' %
+                                os.path.basename(ARCHIVING_BACKEND_BASE_DIRECTORY))
             try:
                 os.makedirs(ARCHIVING_BACKEND_BASE_DIRECTORY)
-            except Exception as e:
+            except Exception, e:
                 raise Exception('Cannot create %s. Error is: %s' % (ARCHIVING_BACKEND_BASE_DIRECTORY, e.message))
             return ARCHIVING_BACKEND_BASE_DIRECTORY
 
@@ -226,7 +257,7 @@ class AmazonS3ArchivingBackend:
             if hours >= LOG_FILE_MAX_DATES_DISTANCE_HOURS:
                 return True
             return False
-        except Exception as e:
+        except Exception, e:
             log.error('Error during rotation conditions checking: %s' % e.message)
             raise
 
@@ -296,26 +327,27 @@ class AmazonS3ArchivingBackend:
             new_file_name = generated_name
 
         try:
-            self.log_map_lock.acquire()
-            os.rename(old_file_name, new_file_name)
+            try:
+                self.log_map_lock.acquire()
+                os.rename(old_file_name, new_file_name)
 
-            log_object['size'] = 0  # Size of written data is cleared due to the file rotation.
-            log_object['first_msg_ts'] = None      # The same is for the first message's timestamp.
+                log_object['size'] = 0  # Size of written data is cleared due to the file rotation.
+                log_object['first_msg_ts'] = None      # The same is for the first message's timestamp.
 
-            self.logs_map[log_name] = log_object
-            rotation_success = True
+                self.logs_map[log_name] = log_object
+                rotation_success = True
 
-            if not self.no_logs_compressing:
-                self.logs_compressor.compress_async(new_file_name, self.compress_callback)
+                if not self.no_logs_compressing:
+                    self.logs_compressor.compress_async(new_file_name, self.compress_callback)
 
-        except threading.ThreadError as e:
-            log.error('Cannot acquire log map lock! Error %s' % e.message)
-        except Exception as e:
-            if e.message:
-                msg = e.message
-            else:
-                msg = e.strerror  # For OSError exceptions
-            log.error('Cannot rename %s to %s for log rotation. Error: %s' % (old_file_name, new_file_name, msg))
+            except threading.ThreadError, e:
+                log.error('Cannot acquire log map lock! Error %s' % e.message)
+            except Exception, e:
+                if hasattr(e, 'strerror'):
+                    msg = e.strerror  # For IO errors and other system-related ones
+                else:
+                    msg = e.message
+                log.error('Cannot rename %s to %s for log rotation. Error: %s' % (old_file_name, new_file_name, msg))
         finally:
             try:
                 self.log_map_lock.release()
@@ -418,15 +450,15 @@ class AmazonS3ArchivingBackend:
                              'timestamp': timestamp}
 
             while len(self.data_queue) == self.data_queue.maxlen:
-                time.sleep(0.1)
+                time.sleep(DATA_QUEUE_FREE_WAIT_PERIOD)
 
             self.data_queue.appendleft(new_data_item)
 
             self.data_queue_thread.data_consumer_event.set()
-        except threading.ThreadError as e:
+        except threading.ThreadError, e:
             log.error('Cannot acquire log write lock! Error %s' % e.message)
             raise
-        except Exception as e:
+        except Exception, e:
             log.error('Cannot put the message to the data queue! Error: %s' % e.message)
             raise
 
@@ -439,13 +471,22 @@ class AmazonS3ArchivingBackend:
 
         :return:
         """
+
+        # If we do not have boto package installed or there are problems with the config or AWS wrapper - just
+        # do nothing and ignore incoming data. All related errors will be reported by AmazonS3ConnectionWrapper
+        if not self.is_enabled:
+            return
+
         log_object = self.logs_map.get(log_name)
         log_object['size'] += len(data)
         local_file = AmazonS3ArchivingBackend.check_local_log_exists(log_object['local_log_file'])
-        with open(local_file['path'],
-                  AmazonS3ArchivingBackend.local_log_file_open_modes[local_file['exists']]) as fd:
+        fd = None
+        try:
+            fd = open(local_file['path'], AmazonS3ArchivingBackend.local_log_file_open_modes[local_file['exists']])
             fd.write(data)
-
+        finally:
+            if fd is not None:
+                fd.close()
 
     def _enumerate_existing_logs(self, logs_base_dir, callback=None):
         """
@@ -466,8 +507,11 @@ class AmazonS3ArchivingBackend:
                     path = logs_base_dir + file_path
                     self.logs_compressor.compress_async(path, callback)
 
-        except Exception as e:
-            message = e.message if e.message != '' else e.strerror
+        except Exception, e:
+            if hasattr(e, 'strerror'):
+                message = e.strerror
+            else:
+                message = e.message
             log.error('Error while enumeration existing logs for archiving: %s' % message)
 
     def _enumerate_existing_archives(self, archives_base_dir):
@@ -485,9 +529,11 @@ class AmazonS3ArchivingBackend:
                         # Logs are already compressed - just call the callback to upload them
                         self.compress_callback(None, os.path.join(dir_path, file_path))
 
-
-        except Exception as e:
-            message = e.message if e.message != '' else e.strerror
+        except Exception, e:
+            if hasattr(e, 'strerror'):
+                message = e.strerror
+            else:
+                message = e.message
             log.error('Error while enumeration existing logs for archiving: %s' % message)
 
     @staticmethod
@@ -500,10 +546,13 @@ class AmazonS3ArchivingBackend:
         :return timestamp - long - timestamp parsed from the file or None if failed to get one:
         """
         timestamp = None
+        fd = None
         try:
-            with open(file_path, 'r') as fd:
-                head = fd.readline().split(' ')
-                timestamp = long(head[0])
-        except Exception as e:
+            fd = open(file_path, 'r')
+            head = fd.readline().split(' ')
+            timestamp = long(head[0])
+        except Exception, e:
             log.error('Cannot parse timestamp from ' + file_path + '. Error: ' + e.message)
+        if fd is not None:
+            fd.close()
         return timestamp
