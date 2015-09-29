@@ -1273,6 +1273,16 @@ class Follower(object):
         self.token = token
         self.amazon_s3_log_name = None
 
+        self.host_name = None
+        if config.name is not None:
+            self.host_name = os.path.basename(config.name)
+        else:
+            self.host_name = socket.getfqdn().split('.')[0]  # my-pc.domain.com -> my-pc
+
+        self.host_name_msg_part = ''
+        if self.host_name is not None:
+            self.host_name_msg_part = 'HostName=' + self.host_name + ' '
+
         if self.need_send_s3 == True:
             if log_tag is not None:
                 self.amazon_s3_log_name = log_tag
@@ -1433,7 +1443,7 @@ class Follower(object):
         self.transport.send(self.formatter.format_line(line))
 
         if self.need_send_s3 is True and self.s3_backend is not None:
-            amazon_msg = self.token + ' ' + line
+            amazon_msg = self.token + ' ' + self.host_name_msg_part + line
             self.s3_backend.put_data_to_local_log(self.amazon_s3_log_name, self.token, amazon_msg)
 
     def close(self):
@@ -1925,7 +1935,7 @@ class Config(object):
                     replace_line = repl % sect_name
                     line = line.replace(os.linesep, '')
                     if need_to_log_errors:
-                        local_var_logger.error('%s in config has bad format and will be replaced with %s' %
+                        log.error('%s in config has bad format and will be replaced with %s' %
                                                (line, replace_line))
                     line = replace_line
                     break
